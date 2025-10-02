@@ -5,7 +5,7 @@ pip install flask flask-cors --ignore-installed
 pip install openai fastapi uvicorn[standard] orjson
 pip install faster-whisper soundfile librosa
 pip install --upgrade transformers datasets[audio] accelerate
-pip install pydub
+pip install pydub hf_transfer
 
 git config user.email zxcv05999@naver.com
 git config user.name thxxx

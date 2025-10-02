@@ -13,7 +13,7 @@ import torchaudio
 import re
 
 ENC_EXEC = ThreadPoolExecutor(max_workers=6)
-DEFAULT_VOICE_PATH = "./utils/output_full.wav"
+DEFAULT_VOICE_PATH = "./utils/output.wav"
 DEFAULT_KOREAN_VOICE_PATH = "./utils/shogun.wav"
 
 tts_model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
