@@ -22,8 +22,9 @@ from utils.text_process import text_pr
 from utils.process import get_volume, pcm16_b64
 from utils.utils import dprint, lprint
 from llm.conversation import conversation_worker, answer_greeting
+from llm.openai import chorok_nudge
 
-from tts.chatter_infer import chatter_streamer
+from tts.chatter_infer import chatter_streamer, cancel_silence_nudge
 
 INPUT_SAMPLE_RATE = 24000
 WHISPER_SR = 16000
@@ -142,6 +143,8 @@ async def ws_endpoint(ws: WebSocket):
                 if t == "scriptsession.start":
                     global ASR
                     lprint("Start ", data);
+                    if data.get('time') is not None:
+                        sess.current_time = data.get('time')
 
                     if sess.language != data.get("language", "ko") or ASR is None:
                         ASR = load_asr_backend(kind=sess.language.strip())
@@ -184,6 +187,7 @@ async def ws_endpoint(ws: WebSocket):
                                     if not get_volume(np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False))[1] > 0.02:
                                         continue
                                     sess.current_audio_state = "start"
+                                    cancel_silence_nudge(sess)
                                     if len(sess.pre_roll) > 0:
                                         sess.audios = np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False)
                                     else:

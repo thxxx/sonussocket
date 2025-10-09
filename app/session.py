@@ -21,6 +21,7 @@ class Session:
         self.name = 'hojin'
         self.user_memory = ''
         self.my_memory = ''
+        self.current_time = ""
         
         self.running = True
 

@@ -7,6 +7,30 @@ from llm.openai import chorok_answer, hodol_greeting
 import orjson as json
 def jdumps(o): return json.dumps(o).decode()
 
+SILENCE_PATTERN = re.compile(r"<\s*silence\s+(\d+(?:\.\d+)?)\s*>", re.IGNORECASE)
+
+def split_by_silence_markers(text: str):
+    """
+    '<silence N>' 기준으로 텍스트/무음 명령을 순서대로 반환.
+    반환 예) ["Hello.", ("__silence__", 3.0), "How are you?"]
+    """
+    parts = []
+    pos = 0
+    for m in SILENCE_PATTERN.finditer(text):
+        if m.start() > pos:
+            seg = text[pos:m.start()].strip()
+            if seg:
+                parts.append(seg)
+        dur = float(m.group(1))
+        parts.append(("__silence__", dur))
+        pos = m.end()
+    # 꼬리 텍스트
+    tail_seg = text[pos:].strip()
+    if tail_seg:
+        parts.append(tail_seg)
+    return parts
+
+
 def reset_conversation(sess: Session):
     sess.transcripts.append(sess.current_transcript)
     sess.current_transcript = ""
@@ -50,7 +74,8 @@ async def answer_greeting(sess: Session):
     def run_blocking():
         return hodol_greeting(
             language=sess.language,
-            name=sess.name
+            name=sess.name,
+            current_time=sess.current_time
         )
 
     output = await loop.run_in_executor(None, run_blocking)
@@ -99,26 +124,36 @@ async def run_answer_async(sess: Session) -> str:
             input=sess.current_transcript,
             language=sess.language,
             onToken=on_token,
+            current_time=sess.current_time
         )
-
+    
     output = await loop.run_in_executor(None, run_blocking)
     answer_text = output.get("text", "") or ""
-
-    # 남은 꼬리 한 번만 푸시 (여기도 await 쓰지 않는 게 포인트)
-    tail = clean_text(answer_text[sent_chars:]).strip()
     
-    if len(tail) > 2:
-        def _f():
-            sess.end_translation_time = time.time()%1000
-            sess.tts_in_q.put_nowait(tail)
-        loop.call_soon_threadsafe(_f)
-
+    pieces = split_by_silence_markers(answer_text)
+    
+    def push_piece(piece):
+        if isinstance(piece, tuple) and len(piece) == 2 and piece[0] == "__silence__":
+            # 무음 컨트롤 메시지 (튜플) - 대기열에 그대로 넣음
+            sess.tts_in_q.put_nowait(("__silence__", piece[1]))
+        else:
+            # 일반 텍스트
+            sess.tts_in_q.put_nowait(piece)
+    
+    # 순서를 유지한 채 한 번에 밀어넣기 (await 금지, 콜백으로 넣음)
+    def _push_all():
+        for p in pieces:
+            push_piece(p)
+    
+    loop.call_soon_threadsafe(_push_all)
+    
     await asyncio.sleep(0)
     cts = sess.current_transcript
     
-    # 최종 알림(중복 방지)
+    # 최종 알림 (그대로 둠)
     def _g():
         sess.out_q.put_nowait(jdumps({"type": "translated", "script": cts, "text": answer_text, "is_final": True}))
     loop.call_soon_threadsafe(_g)
-
+    
     return answer_text
+
