@@ -30,7 +30,6 @@ def split_by_silence_markers(text: str):
         parts.append(tail_seg)
     return parts
 
-
 def reset_conversation(sess: Session):
     sess.transcripts.append(sess.current_transcript)
     sess.current_transcript = ""
@@ -80,6 +79,8 @@ async def answer_greeting(sess: Session):
 
     output = await loop.run_in_executor(None, run_blocking)
     answer_text = (output.get("text", "") or "").strip()
+    sess.transcripts.append('[Call is started. User says nothing yet]')
+    sess.outputs.append(answer_text)
 
     if answer_text:
         loop.call_soon_threadsafe(sess.tts_in_q.put_nowait, answer_text)
@@ -95,26 +96,35 @@ async def answer_greeting(sess: Session):
 
 async def run_answer_async(sess: Session) -> str:
     loop = asyncio.get_running_loop()
-    sent_chars = 0
-    
-    def safe_push_tts(text: str):
-        def _f():
-            sess.tts_in_q.put_nowait(text)  # 절대 await 안 함
-        loop.call_soon_threadsafe(_f)
+    sentence = ''
+    sent_chars = 0  # answer_text 중 이미 보낸 문자 수
+
+    def safe_push_tts(obj):
+        loop.call_soon_threadsafe(sess.tts_in_q.put_nowait, obj)
 
     def safe_push_out(msg: dict):
-        """
-        send translated text to client
-        """
-        def _f():
-            sess.out_q.put_nowait(jdumps(msg))
-        loop.call_soon_threadsafe(_f)
+        loop.call_soon_threadsafe(sess.out_q.put_nowait, jdumps(msg))
 
-    def clean_text(text: str) -> str:
-        return re.sub(r"<[^>]*>", "", text)
+    def push_pieces(pieces):
+        # pieces: ["text", ("__silence__", 3.0), ...]
+        for p in pieces:
+            safe_push_tts(p)
+
+    def flush_buffer_if_has_silence():
+        nonlocal sentence, sent_chars
+        if SILENCE_PATTERN.search(sentence):
+            pieces = split_by_silence_markers(sentence)
+            push_pieces(pieces)
+            sent_chars += len(sentence)
+            sentence = ""
 
     def on_token(tok: str):
+        nonlocal sentence, sent_chars
+        # 토큰 누적
+        sentence += tok
         safe_push_out({"type": "translated", "text": tok, "is_final": False})
+        # 버퍼 기준으로 <silence N> 완성 여부 확인 후 즉시 플러시
+        flush_buffer_if_has_silence()
         return
 
     def run_blocking():
@@ -123,29 +133,20 @@ async def run_answer_async(sess: Session) -> str:
             prev_answers=sess.outputs[-6:],
             input=sess.current_transcript,
             language=sess.language,
-            onToken=on_token,
+            onToken=on_token,           # executor 스레드에서 호출될 가능성 높음
+            name=sess.name,
             current_time=sess.current_time
         )
-    
+
+    # 모델 호출 (blocking → executor)
     output = await loop.run_in_executor(None, run_blocking)
     answer_text = output.get("text", "") or ""
-    
-    pieces = split_by_silence_markers(answer_text)
-    
-    def push_piece(piece):
-        if isinstance(piece, tuple) and len(piece) == 2 and piece[0] == "__silence__":
-            # 무음 컨트롤 메시지 (튜플) - 대기열에 그대로 넣음
-            sess.tts_in_q.put_nowait(("__silence__", piece[1]))
-        else:
-            # 일반 텍스트
-            sess.tts_in_q.put_nowait(piece)
-    
-    # 순서를 유지한 채 한 번에 밀어넣기 (await 금지, 콜백으로 넣음)
-    def _push_all():
-        for p in pieces:
-            push_piece(p)
-    
-    loop.call_soon_threadsafe(_push_all)
+
+    # 남은 꼬리(아직 안 보낸 부분)도 동일 규칙으로 쪼개서 밀어넣기
+    tail = answer_text[sent_chars:]
+    if tail:
+        pieces = split_by_silence_markers(tail)
+        push_pieces(pieces)
     
     await asyncio.sleep(0)
     cts = sess.current_transcript

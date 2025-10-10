@@ -22,7 +22,6 @@ from utils.text_process import text_pr
 from utils.process import get_volume, pcm16_b64
 from utils.utils import dprint, lprint
 from llm.conversation import conversation_worker, answer_greeting
-from llm.openai import chorok_nudge
 
 from tts.chatter_infer import chatter_streamer, cancel_silence_nudge
 
@@ -130,14 +129,14 @@ async def ws_endpoint(ws: WebSocket):
                     if inputprompt:
                         sess.prompt = inputprompt
 
-                if t == 'scriptsession.setname':
-                    name = data.get("name")
-                    print("[scriptsession.name] : ", name)
-                    if name:
-                        sess.name = name
+                # if t == 'scriptsession.setname':
+                #     name = data.get("name")
+                #     print("[scriptsession.name] : ", name)
+                #     if name:
+                #         sess.name = name
                 
-                if t == 'scriptsession.greeting':
-                    await answer_greeting(sess)
+                # if t == 'scriptsession.greeting':
+                #     await answer_greeting(sess)
 
                 # 1) 세션 시작: OpenAI Realtime WS 연결
                 if t == "scriptsession.start":
@@ -149,6 +148,7 @@ async def ws_endpoint(ws: WebSocket):
                     if sess.language != data.get("language", "ko") or ASR is None:
                         ASR = load_asr_backend(kind=sess.language.strip())
                     sess.language = data.get("language", "en").strip()
+                    sess.name = data.get("name", "momo")
                     
                     if sess.stt_task is None:
                         sess.stt_task  = asyncio.create_task(stt_worker(sess, sess.stt_in_q, sess.stt_out_q))
@@ -168,6 +168,8 @@ async def ws_endpoint(ws: WebSocket):
                             dprint("TTS connection error ", e)
                     else:
                         await ws.send_text(jdumps({"type": "warn", "message": "already started"}))
+
+                    await answer_greeting(sess)
 
                 elif t == "input_audio_buffer.append":
                     try:
