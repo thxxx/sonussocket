@@ -123,6 +123,10 @@ async def ws_endpoint(ws: WebSocket):
 
                 t = data.get("type")
 
+                if t == 'ping':
+                    ws.send_text(jdumps({"type": "pong", "t0": data.get("t0"), "server_now": int(time.time() * 1000)}))
+                    continue
+
                 if t == 'scriptsession.setvoice':
                     inputprompt = data.get("prompt")
                     print("[scriptsession.setvoice] : ", inputprompt)
@@ -284,11 +288,6 @@ async def stt_out_consumer(sess: Session):
         msg = await sess.stt_out_q.get()
         try:
             newText = (msg or {}).get("text", "") or ""
-            # 기존 필터 로직 유지
-            # if (len(newText.split(" ")) > 6 and len(set(newText.split(" "))) < 2) or newText in ["감사합니다.", "시청해주셔서 감사합니다."]:
-            #     sess.audios = np.empty(0, dtype=np.float32)
-            #     sess.buf_count = 0
-            #     continue
             if sess.current_audio_state != 'none':
                 sess.transcript = text_pr(sess.transcript, newText)
                 await sess.out_q.put(jdumps({"type": "delta", "text": sess.transcript, "is_final": False}))
@@ -314,7 +313,7 @@ async def interrupt_output(sess: Session, reason: str = "user_speaking"):
         pass
 
     # TTS/LLM 태스크 취소
-    for task_name in ("tts_task", "conversation_task"):
+    for task_name in ("tts_task", "conversation_task", "silence_nudge_task"):
         task = getattr(sess, task_name, None)
         if task and not task.done():
             task.cancel()

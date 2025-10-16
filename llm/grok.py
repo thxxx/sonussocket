@@ -87,7 +87,6 @@ def chorok_nudge(prev_scripts:str, prev_answers:str, language:str = "English", p
         conv += f"User: {prev_scripts[i]},"
         conv += f"Rory: {clean_text(prev_answers[i])},"
 
-    print("선톡 ")
     if len(prev_scripts)>0:
         last_input = prev_scripts[-1]
     else:
@@ -159,7 +158,6 @@ Rules:
 
 Definitions:
 - continuation: lightly extend the previous point (e.g., picking up the last thought).
-- observation: small sensory/ambient remark (surroundings, time, coffee, quiet hum).
 - reflection: brief introspection or afterthought about the last topic.
 - filler: tiny hesitation to bridge the pause (“uh… anyway”, “right, um…”).
 - selfCorrection: mini self-check or quick rephrase of what Rory meant.

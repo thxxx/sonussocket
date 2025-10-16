@@ -43,7 +43,6 @@ class Session:
         self.sender_task: Optional[asyncio.Task] = None
 
         self.language = "ko"
-        self.tts_ws = None
         self.tts_task: Optional[asyncio.Task] = None
         self.stt_task: Optional[asyncio.Task] = None
         self.stt_out_consumer_task: Optional[asyncio.Task] = None

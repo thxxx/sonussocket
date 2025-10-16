@@ -20,7 +20,7 @@ def split_by_silence_markers(text: str):
         if m.start() > pos:
             seg = text[pos:m.start()].strip()
             if seg:
-                parts.append(seg)
+                parts.append(seg + "<cont>")
         dur = float(m.group(1))
         parts.append(("__silence__", dur))
         pos = m.end()

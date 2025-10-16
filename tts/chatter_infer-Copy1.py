@@ -12,54 +12,10 @@ import orjson as json
 import time
 import torchaudio
 import re
-import random
-import opuslib
-import numpy as np
-import struct
-
-# 간단 프레이밍: MAGIC(2) | flags(1) | reserved(1) | seq(u32) | ts_usec(u64) | pkt_len(u32) | pkt(...)
-MAGIC = b'\xA1\x51'
-
-def pack_frame(seq, ts_usec, payload: bytes, is_final=False):
-    flags = 1 if is_final else 0
-    header = MAGIC + struct.pack('<BBIQI', flags, 0, seq, ts_usec, len(payload))
-    return header + payload
-
-class OpusEnc:
-    def __init__(self, sr=24000, channels=1, bitrate=32000):
-        self.sr, self.ch = sr, channels
-        self.frame_ms = 20                           # 20ms 권장
-        self.frame_size = sr * self.frame_ms // 1000 # samples per channel
-        self.enc = opuslib.Encoder(sr, channels, opuslib.APPLICATION_AUDIO)
-        # 일부 버전에선 속성 할당이 안 될 수 있어 try/except
-        try:
-            self.enc.bitrate = bitrate
-        except Exception:
-            self.enc.set_bitrate(bitrate)
-
-    def encode(self, pcm_f32: np.ndarray) -> list[bytes]:
-        """
-        pcm_f32: shape (N,), float32 [-1, 1]
-        returns: list of raw opus packets (bytes), each ~= 20ms
-        """
-        # float32 -> int16 (mono interleaved)
-        pcm_i16 = np.clip(pcm_f32, -1.0, 1.0)
-        pcm_i16 = (pcm_i16 * 32767.0).astype(np.int16, copy=False)
-
-        frames = []
-        n = pcm_i16.shape[0]
-        i = 0
-        # Encoder.encode(data: bytes, frame_size: int, max_data_bytes: int) # 근데 max_data_bytes는 최신버전에서 삭제
-        while i + self.frame_size <= n:
-            chunk_i16 = pcm_i16[i:i+self.frame_size]
-            pkt = self.enc.encode(chunk_i16.tobytes(), self.frame_size)
-            frames.append(pkt)
-            i += self.frame_size
-        return frames
-
+import random  # ✅ 추가
 
 ENC_EXEC = ThreadPoolExecutor(max_workers=6)
-DEFAULT_VOICE_PATH = "./samples/output_full.wav"
+DEFAULT_VOICE_PATH = "./samples/elevenlabs4.mp3"
 DEFAULT_KOREAN_VOICE_PATH = "./samples/shogun.wav"
 
 tts_model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
@@ -108,63 +64,33 @@ async def chatter_streamer(sess: Session):
         sr = 24000
         OVERLAP = int(0.03 * sr)
 
-        opus_enc = OpusEnc(sr=sr, channels=1, bitrate=32000)
-        seq_ref = {"seq": 0}
-        session_t0 = time.time()
-        
-        sess.out_q.put_nowait(jdumps({
-            "type": "tts_audio_meta",
-            "format": "opus",
-            "sample_rate": sr,
-            "channels": 1,
-            "frame_ms": 20,
-        }))
-
-        def put_binary(out_q, b: bytes):
-            out_q.put_nowait(b)
-        
-        async def emit_opus_frames(
-            out_q: asyncio.Queue,
-            enc: OpusEnc,
-            pcm: torch.Tensor,
-            sr: int,
-            seq_ref: dict,
-            is_final: bool = False,
-            t0: float | None = None,
-        ):
-            """
-            pcm을 20ms 단위로 Opus 인코딩해서 바이너리 프레임으로 out_q에 push.
-            """
-            if pcm is None or pcm.numel() == 0:
-                # payload 없는 종료 프레임
-                ts_usec = int(((time.time()) - (t0 or 0.0)) * 1e6) if t0 else 0
-                put_binary(out_q, pack_frame(seq_ref["seq"], ts_usec, b"", is_final=is_final))
-                seq_ref["seq"] += 1
+        async def emit_chunk_b64(wav_chunk: torch.Tensor, is_final: bool = False):
+            if wav_chunk is None or wav_chunk.numel() == 0:
+                sess.out_q.put_nowait(jdumps({
+                    "type": "tts_audio",
+                    "format": "pcm16le",
+                    "sample_rate": sr,
+                    "channels": 1,
+                    "audio": "",
+                    "isFinal": is_final,
+                }))
                 return
-        
-            if pcm.dim() == 2:
-                pcm = pcm.squeeze(0)
-            pcm = pcm.detach().cpu().to(torch.float32).clamp_(-1.0, 1.0)
-        
-            pcm_f32 = pcm.numpy().astype(np.float32, copy=False)
-        
-            frames = enc.encode(pcm_f32)  # list[bytes]
-        
-            now = time.time()
-            for pkt in frames:
-                ts_usec = int((now - (t0 or now)) * 1e6)
-                put_binary(out_q, pack_frame(seq_ref["seq"], ts_usec, pkt, is_final=False))
-                seq_ref["seq"] += 1
-        
-            if is_final:
-                ts_usec = int((time.time() - (t0 or now)) * 1e6)
-                put_binary(out_q, pack_frame(seq_ref["seq"], ts_usec, b"", is_final=True))
-                seq_ref["seq"] += 1
+            b64 = await loop.run_in_executor(ENC_EXEC, pcm16_b64, wav_chunk)
+            sess.out_q.put_nowait(jdumps({
+                "type": "tts_audio",
+                "format": "pcm16le",
+                "sample_rate": sr,
+                "channels": 1,
+                "audio": b64,
+                "isFinal": is_final,
+                "server_ts": int(time.time() * 1000),
+            }))
 
         def start_tts_producer_in_thread(text_chunk: str, ref_audio, out_q: asyncio.Queue):
             stop_evt = sess.tts_stop_event
             text_chunk = re.sub(r"\\n", " ... ", text_chunk)
             text_chunk = re.sub(r"\n", " ... ", text_chunk)
+            print(text_chunk, "\n")
 
             async def produce():
                 try:
@@ -172,7 +98,7 @@ async def chatter_streamer(sess: Session):
                         text_chunk,
                         audio_prompt_path=ref_audio,
                         language_id=sess.language,
-                        chunk_size=32,
+                        chunk_size=40,
                         exaggeration=0.4,
                         cfg_weight=0.55,
                         temperature=0.75,
@@ -209,25 +135,20 @@ async def chatter_streamer(sess: Session):
                 if not text_chunk or sess.tts_stop_event.is_set():
                     print("[chatter_streamer] TTS stop event is set", text_chunk)
                     continue
-                is_last = True
-                if "<cont>" in text_chunk:
-                    print(f"Text {text_chunk} is not done yet")
-                    is_last=False
-                    text_chunk = re.sub('<cont>', '', text_chunk)
                 
                 # ✅ (추가) 무음 컨트롤 메시지 처리
                 if isinstance(text_chunk, tuple) and len(text_chunk) == 2 and text_chunk[0] == "__silence__":
                     try:
-                        silence_sec = float(text_chunk[1]) * 0.4
+                        silence_sec = float(text_chunk[1])*0.4
                         if silence_sec > 0:
                             num_samples = int(silence_sec * sr)
                             silence_wav = torch.zeros(1, num_samples, dtype=torch.float32)
-                            await emit_opus_frames(sess.out_q, opus_enc, silence_wav, sr, seq_ref, is_final=False, t0=session_t0)
-                            print(f"[silence] sent {silence_sec:.2f}s (opus)")
+                            
+                            await emit_chunk_b64(silence_wav, is_final=False)
+                            print(f"[silence] sent {silence_sec:.2f}s")
                     except Exception as e:
                         print(f"[silence] error: {e}")
                     continue
-
 
                 # === 참조 오디오 준비 ===
                 if hasattr(sess, "ref_audios") and not getattr(sess, "ref_audios").empty():
@@ -260,8 +181,7 @@ async def chatter_streamer(sess: Session):
                             wav = wav.mean(dim=0, keepdim=True)  # mono
                         if sr_file != sr:
                             wav = torchaudio.functional.resample(wav, sr_file, sr)
-                        # ✅ Opus로 전송
-                        asyncio.create_task(emit_opus_frames(sess.out_q, opus_enc, wav, sr, seq_ref, is_final=False, t0=session_t0))
+                        asyncio.create_task(emit_chunk_b64(wav, is_final=False))
                     except Exception as e:
                         print(f"[starter] failed to load '{sample_path}': {e}")
 
@@ -324,7 +244,7 @@ async def chatter_streamer(sess: Session):
 
                         print(f"[TTS {(new_total-last_length)/24000:.3f}] - takes {time.time() - start_time:.3f}")
                         total_audio_seconds += (new_total-last_length)/24000
-                        await emit_opus_frames(sess.out_q, opus_enc, out_chunk, sr, seq_ref, is_final=False, t0=session_t0)
+                        await emit_chunk_b64(out_chunk, is_final=False)
 
                         if start_sending_at == 0:
                             start_sending_at = time.time()
@@ -333,12 +253,10 @@ async def chatter_streamer(sess: Session):
                         await asyncio.sleep(0)
 
                     elif evt_type == "eos":
-                        if not is_last:
-                            break
                         if last_tail is not None and last_tail.numel() > 0:
-                            await emit_opus_frames(sess.out_q, opus_enc, last_tail, sr, seq_ref, is_final=True, t0=session_t0)
+                            await emit_chunk_b64(last_tail, is_final=True)
                         else:
-                            await emit_opus_frames(sess.out_q, opus_enc, None, sr, seq_ref, is_final=True, t0=session_t0)
+                            await emit_chunk_b64(None, is_final=True)
 
                         taken = time.time() - start_sending_at
                         remaining_until_audio_end = total_audio_seconds - taken + 1
@@ -356,9 +274,10 @@ async def chatter_streamer(sess: Session):
         await consume_loop()
 
     except asyncio.CancelledError:
-        # print("[chatter_streamer] CANCELLED")
+        print("[chatter_streamer] CANCELLED")
         raise
     except Exception as e:
+        print("[chatter_streamer] ERROR:", e)
         await sess.out_q.put(jdumps({"type": "tts_error", "message": str(e)}))
     finally:
         print("[chatter_streamer] END")
